@@ -1,0 +1,53 @@
+name: Auto Decrypt SH Files
+
+on:
+  workflow_dispatch:
+
+jobs:
+  decrypt:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Install GPG
+        run: sudo apt-get update && sudo apt-get install -y gnupg
+
+      - name: Decrypt .sh files
+        run: |
+          set -e
+          for f in $(find . -type f -name "*.sh"); do
+            if grep -q "gpg -q --decrypt" "$f"; then
+              echo "[*] Processing $f ..."
+              
+              PASS=$(grep -oP "(?<=--passphrase ['\"])[^'\"]+" "$f" | head -n1)
+              [ -z "$PASS" ] && echo "[!] No passphrase found in $f" && continue
+
+              SKIP=$(grep -oP "(?<=tail -n \+)[0-9]+" "$f" | head -n1)
+              [ -z "$SKIP" ] && SKIP=70
+
+              echo "  ↳ Passphrase found (hidden)"
+              echo "  ↳ Skipping first $SKIP lines"
+
+              tail -n +$SKIP "$f" > "$f.encrypted"
+
+              if gpg --batch --yes --passphrase "$PASS" -o "$f.decrypted" -d "$f.encrypted"; then
+                echo "# Decrypted by GitHub Action" > "$f"
+                cat "$f.decrypted" >> "$f"
+                rm "$f.encrypted" "$f.decrypted"
+                echo "[✓] Decrypted $f"
+              else
+                echo "[!] Failed to decrypt $f"
+                rm -f "$f.encrypted" "$f.decrypted"
+              fi
+            fi
+          done
+
+      - name: Commit & Push
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add .
+          git commit -m "Auto-decrypted .sh files" || echo "No changes to commit"
+          git push
