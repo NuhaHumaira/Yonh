@@ -1,4 +1,4 @@
-name: Auto Detect & Decrypt SH
+name: Auto Decrypt SH Files
 
 on:
   workflow_dispatch:
@@ -12,66 +12,68 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v3
 
-      # 2️⃣ Install deps
-      - name: Install deps
+      # 2️⃣ Install GPG & utils
+      - name: Install tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y gnupg openssl xxd
+          sudo apt-get install -y gnupg binutils
 
-      # 3️⃣ Detect & decrypt
+      # 3️⃣ Auto-detect & decrypt .sh files
       - name: Detect & Decrypt .sh
+        shell: bash
         run: |
+          set -e
           for f in $(find . -type f -name "*.sh"); do
             echo "[*] Checking $f ..."
 
-            if grep -q "gpg -q --decrypt" "$f"; then
+            if grep -a "gpg -q --decrypt" "$f" >/dev/null; then
               echo "  [+] Detected: GPG Encrypted Loader"
-              SKIP=$(grep -m1 "^skip=" "$f" | cut -d= -f2)
+
+              #  Extract skip lines (default 70 if not found)
+              SKIP=$(grep -a -m1 "^skip=" "$f" | cut -d= -f2)
               [ -z "$SKIP" ] && SKIP=70
-              PASS=$(grep -oP "(?<=--passphrase ')[^']+" "$f" | head -n1)
-              echo "    ↳ Using passphrase: ${PASS:0:8}..."
-              if tail -n +$SKIP "$f" | gpg --batch --yes --passphrase "$PASS" -d > "$f.dec"; then
+
+              # Extract passphrase (force text mode)
+              PASS=$(strings "$f" | grep -oP "(?<=--passphrase ')[^']+" | head -n1)
+
+              if [ -z "$PASS" ]; then
+                echo "  [!] No passphrase found in $f"
+                continue
+              fi
+
+              echo "    ↳ Using passphrase: ${PASS:0:6}... (hidden)"
+              echo "    ↳ Skipping first $SKIP lines"
+
+              # Extract encrypted payload with tail
+              tail -n +$SKIP "$f" > "$f.encrypted"
+
+              # Fallback: dd after exit 0
+              if ! file "$f.encrypted" | grep -q "PGP"; then
+                echo "    [~] tail method failed, trying dd fallback..."
+                OFFSET=$(grep -an "^exit 0" "$f" | cut -d: -f1 | head -n1)
+                if [ -n "$OFFSET" ]; then
+                  dd if="$f" bs=1 skip=$((OFFSET*50)) of="$f.encrypted" 2>/dev/null || true
+                fi
+              fi
+
+              # Try decrypt
+              if gpg --batch --yes --passphrase "$PASS" -o "$f.dec" -d "$f.encrypted" 2>/dev/null; then
                 echo "# Decrypted by GitHub Action" > "$f"
                 cat "$f.dec" >> "$f"
-                rm "$f.dec"
+                rm -f "$f.encrypted" "$f.dec"
                 echo "  [✓] Decrypted $f"
               else
                 echo "  [!] Failed to decrypt $f"
+                head -n 20 "$f"
               fi
-
-            elif grep -q "shc" "$f"; then
-              echo "  [+] Detected: shc compiled shell script (binary)"
-              echo "  [!] Cannot auto-decrypt SHC binaries without source"
-
-            elif grep -q "base64 -d" "$f"; then
-              echo "  [+] Detected: Base64 encoded script"
-              PAYLOAD=$(grep -A50 "base64 -d" "$f" | grep -oP "[A-Za-z0-9+/=]{20,}" | head -n1)
-              echo "$PAYLOAD" | base64 -d > "$f.dec" 2>/dev/null || true
-              if [ -s "$f.dec" ]; then
-                echo "# Decoded by GitHub Action" > "$f"
-                cat "$f.dec" >> "$f"
-                rm "$f.dec"
-                echo "  [✓] Base64 decoded $f"
-              fi
-
-            elif grep -q "openssl enc" "$f"; then
-              echo "  [+] Detected: OpenSSL encrypted script"
-              echo "  [!] Manual password required, skipping"
-
-            elif grep -q "xor" "$f"; then
-              echo "  [+] Detected: XOR obfuscation"
-              echo "  [!] Need custom XOR key, skipping"
-
-            else
-              echo "  [-] No encryption detected"
             fi
           done
 
-      # 4️⃣ Commit & Push
+      # 4️⃣ Commit & Push changes
       - name: Commit & Push
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
           git add .
-          git commit -m "Auto-decrypted .sh files" || echo "Nothing to commit"
+          git commit -m "Auto-decrypted .sh files" || echo "No changes"
           git push
