@@ -8,23 +8,32 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # 1️⃣ Checkout repo
       - name: Checkout repo
         uses: actions/checkout@v3
 
-      - name: Install GPG
-        run: sudo apt-get update && sudo apt-get install -y gnupg
+      # 2️⃣ Install deps
+      - name: Install GPG & Python
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gnupg python3
 
+      # 3️⃣ Decrypt all .sh files
       - name: Decrypt .sh files
         run: |
           set -e
           for f in $(find . -type f -name "*.sh"); do
-            if grep -q "gpg -q --decrypt" "$f"; then
-              echo "[*] Processing $f ..."
-              
-              PASS=$(grep -oP "(?<=--passphrase ['\"])[^'\"]+" "$f" | head -n1)
-              [ -z "$PASS" ] && echo "[!] No passphrase found in $f" && continue
+            echo "[*] Checking $f ..."
+            
+            if grep -a -q "gpg -q --decrypt" "$f"; then
+              echo "  ↳ Detected GPG encrypted script"
 
-              SKIP=$(grep -oP "(?<=tail -n \+)[0-9]+" "$f" | head -n1)
+              # Extract passphrase
+              PASS=$(grep -a -oP "(?<=--passphrase ['\"])[^'\"]+" "$f" | head -n1)
+              [ -z "$PASS" ] && echo "  [!] No passphrase found in $f" && continue
+
+              # Extract skip line (default 70)
+              SKIP=$(grep -a -oP "(?<=tail -n \+)[0-9]+" "$f" | head -n1)
               [ -z "$SKIP" ] && SKIP=70
 
               echo "  ↳ Passphrase found (hidden)"
@@ -36,14 +45,37 @@ jobs:
                 echo "# Decrypted by GitHub Action" > "$f"
                 cat "$f.decrypted" >> "$f"
                 rm "$f.encrypted" "$f.decrypted"
-                echo "[✓] Decrypted $f"
+                echo "  [✓] Decrypted $f (GPG)"
               else
-                echo "[!] Failed to decrypt $f"
+                echo "  [!] Failed to decrypt $f (GPG)"
                 rm -f "$f.encrypted" "$f.decrypted"
+              fi
+
+            else
+              echo "  ↳ Trying SHC style decryption ..."
+              # Replace eval with echo and run
+              if grep -a -q "eval" "$f"; then
+                cp "$f" "$f.bak"
+                sed 's/eval/echo/' "$f" > "$f.temp"
+                bash "$f.temp" > "$f.out" || true
+
+                if [ -s "$f.out" ]; then
+                  echo "# Decrypted by GitHub Action" > "$f"
+                  cat "$f.out" >> "$f"
+                  rm "$f.temp" "$f.out"
+                  echo "  [✓] Decrypted $f (SHC)"
+                else
+                  echo "  [!] Failed to decrypt $f (SHC)"
+                  mv "$f.bak" "$f" # restore
+                  rm -f "$f.temp" "$f.out"
+                fi
+              else
+                echo "  ↳ No decryption needed for $f"
               fi
             fi
           done
 
+      # 4️⃣ Commit & Push
       - name: Commit & Push
         run: |
           git config user.name "github-actions"
