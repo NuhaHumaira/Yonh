@@ -1,8 +1,6 @@
-name: Auto Decrypt SH Files
+name: Auto Detect & Decrypt SH
 
 on:
-  push:
-    branches: [ main ]
   workflow_dispatch:
 
 jobs:
@@ -10,88 +8,70 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1️⃣ Checkout repository
-      - name: Checkout repository
+      # 1️⃣ Checkout repo
+      - name: Checkout repo
         uses: actions/checkout@v3
 
-      # 2️⃣ Install GPG
-      - name: Install GPG
-        run: sudo apt-get update && sudo apt-get install -y gnupg
-
-      # 3️⃣ Detect & Decrypt .sh files
-      - name: Decrypt .sh files
+      # 2️⃣ Install deps
+      - name: Install deps
         run: |
-          set -e
+          sudo apt-get update
+          sudo apt-get install -y gnupg openssl xxd
+
+      # 3️⃣ Detect & decrypt
+      - name: Detect & Decrypt .sh
+        run: |
           for f in $(find . -type f -name "*.sh"); do
             echo "[*] Checking $f ..."
 
-            if grep -a -q "gpg -q --decrypt" "$f"; then
-              echo "  ↳ Detected: GPG encrypted"
-
-              PASS=$(grep -a -oP "(?<=--passphrase ['\"])[^'\"]+" "$f" | head -n1)
-              [ -z "$PASS" ] && echo "  [!] No passphrase found in $f" && continue
-
-              SKIP=$(grep -a -oP "(?<=tail -n \+)[0-9]+" "$f" | head -n1)
+            if grep -q "gpg -q --decrypt" "$f"; then
+              echo "  [+] Detected: GPG Encrypted Loader"
+              SKIP=$(grep -m1 "^skip=" "$f" | cut -d= -f2)
               [ -z "$SKIP" ] && SKIP=70
-
-              echo "  ↳ Using passphrase (hidden), skip $SKIP lines"
-              tail -n +$SKIP "$f" > "$f.encrypted"
-
-              if gpg --batch --yes --passphrase "$PASS" -o "$f.decrypted" -d "$f.encrypted"; then
+              PASS=$(grep -oP "(?<=--passphrase ')[^']+" "$f" | head -n1)
+              echo "    ↳ Using passphrase: ${PASS:0:8}..."
+              if tail -n +$SKIP "$f" | gpg --batch --yes --passphrase "$PASS" -d > "$f.dec"; then
                 echo "# Decrypted by GitHub Action" > "$f"
-                cat "$f.decrypted" >> "$f"
-                rm "$f.encrypted" "$f.decrypted"
-                echo "  [✓] Decrypted $f (GPG)"
+                cat "$f.dec" >> "$f"
+                rm "$f.dec"
+                echo "  [✓] Decrypted $f"
               else
-                echo "  [!] Failed to decrypt $f with GPG"
-                rm -f "$f.encrypted" "$f.decrypted"
+                echo "  [!] Failed to decrypt $f"
               fi
 
-            elif grep -a -q "eval" "$f"; then
-              echo "  ↳ Detected: SHC / eval encrypted"
+            elif grep -q "shc" "$f"; then
+              echo "  [+] Detected: shc compiled shell script (binary)"
+              echo "  [!] Cannot auto-decrypt SHC binaries without source"
 
-              cp "$f" "$f.bak"
-              sed 's/eval/echo/' "$f" > "$f.temp"
-              bash "$f.temp" > "$f.out" || true
-
-              if [ -s "$f.out" ]; then
-                echo "# Decrypted by GitHub Action" > "$f"
-                cat "$f.out" >> "$f"
-                rm "$f.temp" "$f.out" "$f.bak"
-                echo "  [✓] Decrypted $f (SHC)"
-              else
-                echo "  [!] Failed to decrypt $f (SHC)"
-                mv "$f.bak" "$f"
-                rm -f "$f.temp" "$f.out"
+            elif grep -q "base64 -d" "$f"; then
+              echo "  [+] Detected: Base64 encoded script"
+              PAYLOAD=$(grep -A50 "base64 -d" "$f" | grep -oP "[A-Za-z0-9+/=]{20,}" | head -n1)
+              echo "$PAYLOAD" | base64 -d > "$f.dec" 2>/dev/null || true
+              if [ -s "$f.dec" ]; then
+                echo "# Decoded by GitHub Action" > "$f"
+                cat "$f.dec" >> "$f"
+                rm "$f.dec"
+                echo "  [✓] Base64 decoded $f"
               fi
 
-            elif grep -a -q "base64 -d" "$f"; then
-              echo "  ↳ Detected: Base64 encoded"
+            elif grep -q "openssl enc" "$f"; then
+              echo "  [+] Detected: OpenSSL encrypted script"
+              echo "  [!] Manual password required, skipping"
 
-              cp "$f" "$f.bak"
-              bash "$f" > "$f.out" || true
-
-              if [ -s "$f.out" ]; then
-                echo "# Decrypted by GitHub Action" > "$f"
-                cat "$f.out" >> "$f"
-                rm "$f.out" "$f.bak"
-                echo "  [✓] Decrypted $f (Base64)"
-              else
-                echo "  [!] Failed to decrypt $f (Base64)"
-                mv "$f.bak" "$f"
-                rm -f "$f.out"
-              fi
+            elif grep -q "xor" "$f"; then
+              echo "  [+] Detected: XOR obfuscation"
+              echo "  [!] Need custom XOR key, skipping"
 
             else
-              echo "  ↳ No encryption detected, skipping"
+              echo "  [-] No encryption detected"
             fi
           done
 
-      # 4️⃣ Commit & Push decrypted files
+      # 4️⃣ Commit & Push
       - name: Commit & Push
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
           git add .
-          git commit -m "Auto-decrypted .sh files" || echo "No changes to commit"
+          git commit -m "Auto-decrypted .sh files" || echo "Nothing to commit"
           git push
